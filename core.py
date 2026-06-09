@@ -77,6 +77,16 @@ def _show_inline_help():
     Prompt.ask("[dim]Press Enter to return[/dim]", default="")
 
 
+# Binary name → actual binary installed by nixpkgs (differs from what hackingtool expects)
+_NIXPKGS_ALIASES: dict[str, str] = {
+    "bloodhound":        "BloodHound",
+    "bloodhound-python": "BloodHound",
+    "routersploit":      "rsf",
+    "ligolo-ng":         "ligolo-proxy",
+    "volatility3":       "vol",
+}
+
+
 class HackingTool:
     TITLE: str              = ""
     DESCRIPTION: str        = ""
@@ -127,20 +137,26 @@ class HackingTool:
                  "python", "python2", "python3", "ruby", "perl",
                  "php", "node", "java"}
 
+        def _which(name: str) -> bool:
+            """Check PATH, then NixOS alias (different package binary name)."""
+            return bool(shutil.which(name) or shutil.which(_NIXPKGS_ALIASES.get(name, "")))
+
         def _effective_binary(cmd: str) -> str:
-            """Strip chain operators and privilege prefix, return first token."""
+            """Strip chain operators, privilege prefix, path prefix; return basename."""
             for sep in ("&&", ";"):
                 if sep in cmd:
                     cmd = cmd.split(sep)[-1].strip()
             for priv in ("sudo ", "doas "):
                 if cmd.startswith(priv):
                     cmd = cmd[len(priv):]
-            return cmd.split()[0] if cmd.strip() else ""
+            token = cmd.split()[0] if cmd.strip() else ""
+            # drop absolute or home-relative paths (e.g. ~/go/bin/dalfox → dalfox)
+            return os.path.basename(token) if token else ""
 
         # 1. Binary from RUN_COMMANDS
         for rc in self.RUN_COMMANDS:
             b = _effective_binary(rc)
-            if b and b not in _SKIP and shutil.which(b):
+            if b and b not in _SKIP and _which(b):
                 return True
 
         # 2. Candidates derived from each INSTALL_COMMAND
@@ -149,18 +165,16 @@ class HackingTool:
             # go install — derive binary name from module path
             if "go install" in ic:
                 module = ic.split()[-1].split("@")[0].rstrip("/...")
-                # prefer explicit /cmd/BINARY sub-path
                 m = re.search(r"/cmd/(\w[\w-]+)$", module)
                 if m:
                     binary = m.group(1)
                 else:
-                    # last non-version path component (skip v\d+ segments)
                     parts = module.split("/")
                     binary = next(
                         (p for p in reversed(parts) if p and not re.match(r"^v\d+", p)),
                         None,
                     )
-                if binary and shutil.which(binary):
+                if binary and _which(binary):
                     return True
 
             # pip install — package name is usually the binary too
@@ -168,13 +182,13 @@ class HackingTool:
                 m = re.search(r"pip[23]?\s+install\s+(?:--\S+\s+)*(\w[\w.\-]+)", ic)
                 if m:
                     name = m.group(1).lower()
-                    if shutil.which(name) or shutil.which(name.replace("-", "")):
+                    if _which(name) or _which(name.replace("-", "")):
                         return True
 
             # apt / apt-get install
             elif re.search(r"apt(?:-get)?\s+install", ic):
                 m = re.search(r"apt(?:-get)?\s+install\s+(?:-\S+\s+)*(\S+)", ic)
-                if m and shutil.which(m.group(1)):
+                if m and _which(m.group(1)):
                     return True
 
             # git clone — try repo name on PATH first (catches Nix system pkgs),
@@ -185,11 +199,9 @@ class HackingTool:
                 if not urls:
                     continue
                 repo_name = urls[0].rstrip("/").rsplit("/", 1)[-1].replace(".git", "")
-                # binary candidates: original case + lowercase (e.g. theHarvester → theharvester)
                 for candidate in (repo_name, repo_name.lower()):
-                    if shutil.which(candidate):
+                    if _which(candidate):
                         return True
-                # fall back: check for an actual local clone in tools_dir
                 url_idx = parts.index(urls[0])
                 if url_idx + 1 < len(parts) and not parts[url_idx + 1].startswith("-"):
                     clone_dir = parts[url_idx + 1]
